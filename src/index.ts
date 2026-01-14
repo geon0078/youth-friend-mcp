@@ -6,6 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
 import express, { Request, Response } from "express";
+import { randomUUID } from "crypto";
 
 // ============================================
 // API 설정 (12개 API) - 환경변수에서 로드
@@ -1649,8 +1650,8 @@ async function startHttpServer() {
   app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Session-Id");
-    res.header("Access-Control-Expose-Headers", "Content-Type, X-Session-Id");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Mcp-Session-Id");
+    res.header("Access-Control-Expose-Headers", "Content-Type, Mcp-Session-Id");
     if (req.method === "OPTIONS") {
       return res.sendStatus(200);
     }
@@ -1660,7 +1661,7 @@ async function startHttpServer() {
   app.use(express.json());
 
   // 세션 관리
-  const sessions: Map<string, { transport: SSEServerTransport; server: McpServer }> = new Map();
+  const sessions: Map<string, SSEServerTransport> = new Map();
 
   // Health check
   app.get("/health", (req: Request, res: Response) => {
@@ -1672,17 +1673,15 @@ async function startHttpServer() {
     });
   });
 
-  // SSE endpoint
+  // SSE 엔드포인트 - GET (SSE 스트림 연결)
   app.get("/sse", async (req: Request, res: Response) => {
-    console.log("SSE 연결 요청 수신");
+    console.log("GET /sse - SSE 연결 요청");
 
-    const transport = new SSEServerTransport("/message", res);
+    const transport = new SSEServerTransport("/sse", res);
     const sessionId = transport.sessionId;
 
     console.log(`새 세션 생성: ${sessionId}`);
-
-    // 세션 저장
-    sessions.set(sessionId, { transport, server });
+    sessions.set(sessionId, transport);
 
     res.on("close", () => {
       console.log(`세션 종료: ${sessionId}`);
@@ -1697,41 +1696,37 @@ async function startHttpServer() {
     }
   });
 
-  // Message endpoint (SSE 클라이언트가 POST로 메시지 전송)
-  app.post("/message", async (req: Request, res: Response) => {
+  // SSE 엔드포인트 - POST (메시지 처리)
+  app.post("/sse", async (req: Request, res: Response) => {
     const sessionId = req.query.sessionId as string;
-    console.log(`메시지 수신 - 세션: ${sessionId}`);
+    console.log(`POST /sse - 메시지 수신, 세션: ${sessionId}`);
 
-    const session = sessions.get(sessionId);
-    if (!session) {
+    const transport = sessions.get(sessionId);
+    if (!transport) {
       console.error(`세션을 찾을 수 없음: ${sessionId}`);
       return res.status(404).json({
-        error: "세션을 찾을 수 없습니다",
-        sessionId,
-        availableSessions: Array.from(sessions.keys())
+        jsonrpc: "2.0",
+        error: {
+          code: -32000,
+          message: "세션을 찾을 수 없습니다"
+        },
+        id: null
       });
     }
 
     try {
-      await session.transport.handlePostMessage(req, res);
+      await transport.handlePostMessage(req, res);
     } catch (error) {
       console.error("메시지 처리 오류:", error);
-      res.status(500).json({ error: "메시지 처리 중 오류 발생" });
+      res.status(500).json({
+        jsonrpc: "2.0",
+        error: {
+          code: -32603,
+          message: "메시지 처리 중 오류 발생"
+        },
+        id: null
+      });
     }
-  });
-
-  // MCP 메타데이터 엔드포인트 (PlayMCP 호환)
-  app.get("/mcp", (req: Request, res: Response) => {
-    res.json({
-      name: "청년친구 MCP",
-      version: "3.0.0",
-      description: "청년정책, 청년센터, 고용24 정보 통합 제공 MCP 서버",
-      transport: {
-        type: "sse",
-        endpoint: "/sse"
-      },
-      tools: 22
-    });
   });
 
   // 루트 경로 - API 정보
@@ -1741,20 +1736,14 @@ async function startHttpServer() {
       version: "3.0.0",
       description: "청년정책, 청년센터, 고용24 정보 통합 제공",
       transport: "sse",
-      endpoints: {
-        mcp: "GET /mcp - MCP 메타데이터",
-        health: "GET /health - 헬스체크",
-        sse: "GET /sse - SSE 연결",
-        message: "POST /message?sessionId=xxx - 메시지 전송"
-      },
+      endpoint: "/sse",
       tools: 22
     });
   });
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`청년친구 MCP 서버 v3.0이 시작되었습니다. (HTTP/SSE 모드, 포트: ${PORT})`);
-    console.log(`SSE 엔드포인트: /sse`);
-    console.log(`메시지 엔드포인트: /message`);
+    console.log(`SSE 엔드포인트: GET /sse (연결), POST /sse (메시지)`);
   });
 }
 
