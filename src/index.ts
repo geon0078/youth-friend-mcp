@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import "dotenv/config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
@@ -1647,8 +1648,9 @@ async function startHttpServer() {
   // CORS 설정
   app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Session-Id");
+    res.header("Access-Control-Expose-Headers", "Content-Type, X-Session-Id");
     if (req.method === "OPTIONS") {
       return res.sendStatus(200);
     }
@@ -1657,37 +1659,79 @@ async function startHttpServer() {
 
   app.use(express.json());
 
+  // 세션 관리
+  const sessions: Map<string, { transport: SSEServerTransport; server: McpServer }> = new Map();
+
   // Health check
   app.get("/health", (req: Request, res: Response) => {
-    res.json({ status: "ok", version: "3.0.0", tools: 22 });
+    res.json({
+      status: "ok",
+      version: "3.0.0",
+      tools: 22,
+      activeSessions: sessions.size
+    });
   });
 
   // SSE endpoint
-  const transports: Map<string, SSEServerTransport> = new Map();
-
   app.get("/sse", async (req: Request, res: Response) => {
-    console.log("SSE 연결 요청");
-    const transport = new SSEServerTransport("/messages", res);
-    const sessionId = Math.random().toString(36).substring(7);
-    transports.set(sessionId, transport);
+    console.log("SSE 연결 요청 수신");
+
+    const transport = new SSEServerTransport("/message", res);
+    const sessionId = transport.sessionId;
+
+    console.log(`새 세션 생성: ${sessionId}`);
+
+    // 세션 저장
+    sessions.set(sessionId, { transport, server });
 
     res.on("close", () => {
-      console.log(`SSE 연결 종료: ${sessionId}`);
-      transports.delete(sessionId);
+      console.log(`세션 종료: ${sessionId}`);
+      sessions.delete(sessionId);
     });
 
-    await server.connect(transport);
+    try {
+      await server.connect(transport);
+    } catch (error) {
+      console.error("SSE 연결 오류:", error);
+      sessions.delete(sessionId);
+    }
   });
 
-  app.post("/messages", async (req: Request, res: Response) => {
+  // Message endpoint (SSE 클라이언트가 POST로 메시지 전송)
+  app.post("/message", async (req: Request, res: Response) => {
     const sessionId = req.query.sessionId as string;
-    const transport = transports.get(sessionId);
+    console.log(`메시지 수신 - 세션: ${sessionId}`);
 
-    if (transport) {
-      await transport.handlePostMessage(req, res);
-    } else {
-      res.status(400).json({ error: "세션을 찾을 수 없습니다" });
+    const session = sessions.get(sessionId);
+    if (!session) {
+      console.error(`세션을 찾을 수 없음: ${sessionId}`);
+      return res.status(404).json({
+        error: "세션을 찾을 수 없습니다",
+        sessionId,
+        availableSessions: Array.from(sessions.keys())
+      });
     }
+
+    try {
+      await session.transport.handlePostMessage(req, res);
+    } catch (error) {
+      console.error("메시지 처리 오류:", error);
+      res.status(500).json({ error: "메시지 처리 중 오류 발생" });
+    }
+  });
+
+  // MCP 메타데이터 엔드포인트 (PlayMCP 호환)
+  app.get("/mcp", (req: Request, res: Response) => {
+    res.json({
+      name: "청년친구 MCP",
+      version: "3.0.0",
+      description: "청년정책, 청년센터, 고용24 정보 통합 제공 MCP 서버",
+      transport: {
+        type: "sse",
+        endpoint: "/sse"
+      },
+      tools: 22
+    });
   });
 
   // 루트 경로 - API 정보
@@ -1696,17 +1740,21 @@ async function startHttpServer() {
       name: "청년친구 MCP",
       version: "3.0.0",
       description: "청년정책, 청년센터, 고용24 정보 통합 제공",
+      transport: "sse",
       endpoints: {
-        health: "/health",
-        sse: "/sse",
-        messages: "/messages"
+        mcp: "GET /mcp - MCP 메타데이터",
+        health: "GET /health - 헬스체크",
+        sse: "GET /sse - SSE 연결",
+        message: "POST /message?sessionId=xxx - 메시지 전송"
       },
       tools: 22
     });
   });
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`청년친구 MCP 서버 v3.0이 시작되었습니다. (HTTP 모드, 포트: ${PORT})`);
+    console.log(`청년친구 MCP 서버 v3.0이 시작되었습니다. (HTTP/SSE 모드, 포트: ${PORT})`);
+    console.log(`SSE 엔드포인트: /sse`);
+    console.log(`메시지 엔드포인트: /message`);
   });
 }
 
