@@ -2423,6 +2423,412 @@ async function startHttpServer() {
       return res.status(204).send();
     }
 
+    // tools/call 처리
+    if (body.method === "tools/call") {
+      const { name, arguments: args } = body.params || {};
+      console.log(`tools/call: ${name}`, args);
+
+      try {
+        let result: string;
+
+        switch (name) {
+          case "mega_search": {
+            const { keyword, age, region, limit = 5 } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+            const zipCd = regionCode ? (regionCode.length === 2 ? `${regionCode}000` : regionCode) : undefined;
+
+            const [policyData, centerData, jobs, companies, courses] = await Promise.all([
+              fetchYouthPolicies({
+                pageNum: "1", pageSize: String(limit * 2), pageType: "1", plcyNm: keyword,
+                ...(zipCd && { zipCd })
+              }).catch(() => ({ result: { youthPolicyList: [], pagging: { totCount: 0 } } })),
+              fetchYouthCenters({
+                pageNum: "1", pageSize: String(limit),
+                ...(regionCode && { ctpvCd: regionCode.substring(0, 2) })
+              }).catch(() => ({ result: { youthPolicyList: [], pagging: { totCount: 0 } } })),
+              fetchJobPostings({
+                startPage: "1", display: String(limit), keyword,
+                ...(zipCd && { region: zipCd })
+              }).catch(() => []),
+              fetchSmallGiantCompanies({
+                startPage: "1", display: String(limit),
+                ...(regionCode && { region: regionCode })
+              }).catch(() => []),
+              fetchTrainingCourses({
+                pageNum: "1", pageSize: String(limit), srchTraNm: keyword,
+                srchTraStDt: getDateString(), srchTraEndDt: getDateString(90),
+                ...(regionCode && { srchTraArea1: regionCode.substring(0, 2) })
+              }).catch(() => []),
+            ]);
+
+            let policies = policyData.result.youthPolicyList || [];
+            if (age) policies = filterPoliciesByAge(policies, age);
+            const centers = centerData.result.youthPolicyList || [];
+
+            result = [
+              `# 🔍 "${keyword}" 메가 통합 검색`,
+              age ? `**필터:** ${age}세` : "", region ? `**지역:** ${region}` : "", "",
+              `## 📋 청년정책 (${policies.length}개)`,
+              policies.slice(0, limit).map(formatPolicyBrief).join("\n") || "_없음_", "",
+              `## 🏢 청년센터 (${centers.length}개)`,
+              centers.map(formatCenterBrief).join("\n") || "_없음_", "",
+              `## 💼 채용정보 (${jobs.length}개)`,
+              jobs.map(formatJobPosting).join("\n") || "_없음_", "",
+              `## 🏆 강소기업 (${companies.length}개)`,
+              companies.map(formatSmallGiant).join("\n") || "_없음_", "",
+              `## 📚 훈련과정 (${courses.length}개)`,
+              courses.map(formatTrainingCourse).join("\n") || "_없음_",
+            ].filter(l => l !== "").join("\n");
+            break;
+          }
+
+          case "employment_full_package": {
+            const { jobKeyword, region, age, career = "N" } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+            const zipCd = regionCode ? (regionCode.length === 2 ? `${regionCode}000` : regionCode) : undefined;
+
+            const [jobs, policies, courses, companies] = await Promise.all([
+              fetchJobPostings({
+                startPage: "1", display: "10", keyword: jobKeyword, career,
+                ...(zipCd && { region: zipCd })
+              }).catch(() => []),
+              fetchYouthPolicies({
+                pageNum: "1", pageSize: "10", pageType: "1", plcyNm: jobKeyword,
+                ...(zipCd && { zipCd })
+              }).catch(() => ({ result: { youthPolicyList: [] } })),
+              fetchTrainingCourses({
+                pageNum: "1", pageSize: "10", srchTraNm: jobKeyword,
+                srchTraStDt: getDateString(), srchTraEndDt: getDateString(90),
+                ...(regionCode && { srchTraArea1: regionCode.substring(0, 2) })
+              }).catch(() => []),
+              fetchSmallGiantCompanies({
+                startPage: "1", display: "5",
+                ...(regionCode && { region: regionCode })
+              }).catch(() => []),
+            ]);
+
+            let pols = policies.result?.youthPolicyList || [];
+            if (age) pols = filterPoliciesByAge(pols, age);
+
+            result = [
+              `# 💼 "${jobKeyword}" 취업 풀패키지`,
+              region ? `**희망지역:** ${region}` : "", career === "N" ? "**경력:** 신입" : career === "E" ? "**경력:** 경력" : "", "",
+              `## 🔎 채용정보 (${jobs.length}개)`,
+              jobs.map(formatJobPosting).join("\n") || "_없음_", "",
+              `## 📚 관련 훈련과정 (${courses.length}개)`,
+              courses.map(formatTrainingCourse).join("\n") || "_없음_", "",
+              `## 📋 지원 정책 (${pols.length}개)`,
+              pols.slice(0, 5).map(formatPolicyBrief).join("\n") || "_없음_", "",
+              `## 🏆 강소기업 (${companies.length}개)`,
+              companies.map(formatSmallGiant).join("\n") || "_없음_",
+            ].filter(l => l !== "").join("\n");
+            break;
+          }
+
+          case "training_job_bridge": {
+            const { trainingKeyword, region, ncsCode } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+            const zipCd = regionCode ? (regionCode.length === 2 ? `${regionCode}000` : regionCode) : undefined;
+
+            const courses = await fetchTrainingCourses({
+              pageNum: "1", pageSize: "10", srchTraNm: trainingKeyword,
+              srchTraStDt: getDateString(), srchTraEndDt: getDateString(90),
+              ...(regionCode && { srchTraArea1: regionCode.substring(0, 2) }),
+              ...(ncsCode && { srchNcs1: ncsCode })
+            }).catch(() => []);
+
+            const ncsKeywords = courses.slice(0, 3).map((c: any) => c.trainNm || trainingKeyword);
+            const jobs = await fetchJobPostings({
+              startPage: "1", display: "10",
+              keyword: ncsKeywords[0] || trainingKeyword,
+              ...(zipCd && { region: zipCd })
+            }).catch(() => []);
+
+            result = [
+              `# 🌉 훈련→채용 브릿지: "${trainingKeyword}"`,
+              region ? `**지역:** ${region}` : "", "",
+              `## 📚 관련 훈련과정 (${courses.length}개)`,
+              courses.map(formatTrainingCourse).join("\n") || "_없음_", "",
+              `## 💼 연계 채용정보 (${jobs.length}개)`,
+              jobs.map(formatJobPosting).join("\n") || "_없음_",
+            ].filter(l => l !== "").join("\n");
+            break;
+          }
+
+          case "personalized_recommendations": {
+            const { age, region, category, employmentStatus } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+            const zipCd = regionCode ? (regionCode.length === 2 ? `${regionCode}000` : regionCode) : undefined;
+
+            const [policyData, centerData, courses] = await Promise.all([
+              fetchYouthPolicies({
+                pageNum: "1", pageSize: "20", pageType: "1",
+                ...(zipCd && { zipCd }),
+                ...(category && category !== "전체" && { plcyTp: category })
+              }).catch(() => ({ result: { youthPolicyList: [] } })),
+              fetchYouthCenters({
+                pageNum: "1", pageSize: "5",
+                ...(regionCode && { ctpvCd: regionCode.substring(0, 2) })
+              }).catch(() => ({ result: { youthPolicyList: [] } })),
+              fetchTrainingCourses({
+                pageNum: "1", pageSize: "5",
+                srchTraStDt: getDateString(), srchTraEndDt: getDateString(90),
+                ...(regionCode && { srchTraArea1: regionCode.substring(0, 2) })
+              }).catch(() => []),
+            ]);
+
+            let policies = filterPoliciesByAge(policyData.result?.youthPolicyList || [], age);
+            const centers = centerData.result?.youthPolicyList || [];
+
+            result = [
+              `# 🎯 ${age}세 ${region} 맞춤 추천`,
+              employmentStatus ? `**상태:** ${employmentStatus}` : "", category ? `**관심분야:** ${category}` : "", "",
+              `## 📋 맞춤 정책 (${policies.length}개)`,
+              policies.slice(0, 10).map(formatPolicyBrief).join("\n") || "_없음_", "",
+              `## 🏢 인근 청년센터 (${centers.length}개)`,
+              centers.map(formatCenterBrief).join("\n") || "_없음_", "",
+              `## 📚 추천 훈련 (${courses.length}개)`,
+              courses.map(formatTrainingCourse).join("\n") || "_없음_",
+            ].filter(l => l !== "").join("\n");
+            break;
+          }
+
+          case "small_giant_package": {
+            const { region, industry, includeJobPostings = true, includeTraining = true } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+
+            const companies = await fetchSmallGiantCompanies({
+              startPage: "1", display: "10",
+              ...(regionCode && { region: regionCode })
+            }).catch(() => []);
+
+            let jobs: any[] = [], courses: any[] = [];
+            if (includeJobPostings) {
+              jobs = await fetchJobPostings({
+                startPage: "1", display: "5", keyword: industry || "청년",
+                ...(regionCode && { region: regionCode.length === 2 ? `${regionCode}000` : regionCode })
+              }).catch(() => []);
+            }
+            if (includeTraining) {
+              courses = await fetchTrainingCourses({
+                pageNum: "1", pageSize: "5", srchTraGbn: "C",
+                srchTraStDt: getDateString(), srchTraEndDt: getDateString(90),
+                ...(regionCode && { srchTraArea1: regionCode.substring(0, 2) })
+              }).catch(() => []);
+            }
+
+            result = [
+              `# 🏆 강소기업 취업 패키지`,
+              region ? `**지역:** ${region}` : "", industry ? `**업종:** ${industry}` : "", "",
+              `## 🏆 청년친화강소기업 (${companies.length}개)`,
+              companies.map(formatSmallGiant).join("\n") || "_없음_",
+              includeJobPostings ? `\n## 💼 관련 채용 (${jobs.length}개)\n${jobs.map(formatJobPosting).join("\n") || "_없음_"}` : "",
+              includeTraining ? `\n## 📚 일학습병행 (${courses.length}개)\n${courses.map(formatTrainingCourse).join("\n") || "_없음_"}` : "",
+            ].filter(l => l !== "").join("\n");
+            break;
+          }
+
+          case "urgent_deadlines": {
+            const { region, daysLimit = 30, category } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+            const zipCd = regionCode ? (regionCode.length === 2 ? `${regionCode}000` : regionCode) : undefined;
+
+            const [policyData, courses] = await Promise.all([
+              fetchYouthPolicies({
+                pageNum: "1", pageSize: "30", pageType: "1",
+                ...(zipCd && { zipCd }),
+                ...(category && { plcyTp: category })
+              }).catch(() => ({ result: { youthPolicyList: [] } })),
+              fetchTrainingCourses({
+                pageNum: "1", pageSize: "20",
+                srchTraStDt: getDateString(), srchTraEndDt: getDateString(daysLimit),
+                ...(regionCode && { srchTraArea1: regionCode.substring(0, 2) })
+              }).catch(() => []),
+            ]);
+
+            const now = new Date();
+            const policies = (policyData.result?.youthPolicyList || [])
+              .filter((p: any) => {
+                if (!p.plcySprtTermCn) return false;
+                const match = p.plcySprtTermCn.match(/(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
+                if (!match) return false;
+                const endDate = new Date(parseInt(match[1]), parseInt(match[2]) - 1, parseInt(match[3]));
+                const daysLeft = Math.ceil((endDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+                return daysLeft > 0 && daysLeft <= daysLimit;
+              })
+              .slice(0, 10);
+
+            result = [
+              `# ⏰ 마감 임박 긴급 모드`,
+              `**기준:** ${daysLimit}일 이내 마감`, region ? `**지역:** ${region}` : "", "",
+              `## 📋 마감 임박 정책 (${policies.length}개)`,
+              policies.map(formatPolicyBrief).join("\n") || "_마감 임박 정책 없음_", "",
+              `## 📚 곧 시작 훈련 (${courses.length}개)`,
+              courses.slice(0, 10).map(formatTrainingCourse).join("\n") || "_없음_",
+            ].filter(l => l !== "").join("\n");
+            break;
+          }
+
+          case "zero_cost_plan": {
+            const { region, age, category, includeTraining = true, includeCenters = true } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+            const zipCd = regionCode ? (regionCode.length === 2 ? `${regionCode}000` : regionCode) : undefined;
+
+            const [policyData, centerData, courses] = await Promise.all([
+              fetchYouthPolicies({
+                pageNum: "1", pageSize: "30", pageType: "1",
+                ...(zipCd && { zipCd }),
+                ...(category && { plcyTp: category })
+              }).catch(() => ({ result: { youthPolicyList: [] } })),
+              includeCenters ? fetchYouthCenters({
+                pageNum: "1", pageSize: "5",
+                ...(regionCode && { ctpvCd: regionCode.substring(0, 2) })
+              }).catch(() => ({ result: { youthPolicyList: [] } })) : Promise.resolve({ result: { youthPolicyList: [] } }),
+              includeTraining ? fetchTrainingCourses({
+                pageNum: "1", pageSize: "10", srchTraGbn: "C",
+                srchTraStDt: getDateString(), srchTraEndDt: getDateString(90),
+                ...(regionCode && { srchTraArea1: regionCode.substring(0, 2) })
+              }).catch(() => []) : Promise.resolve([]),
+            ]);
+
+            let policies = (policyData.result?.youthPolicyList || [])
+              .filter((p: any) => {
+                const content = (p.plcySprtCn || "").toLowerCase();
+                return content.includes("무료") || content.includes("국비") || content.includes("전액") || content.includes("지원금");
+              });
+            if (age) policies = filterPoliciesByAge(policies, age);
+            const centers = centerData.result?.youthPolicyList || [];
+
+            result = [
+              `# 💰 비용 제로 플랜`,
+              `**조건:** 무료/국비 지원만`, region ? `**지역:** ${region}` : "", age ? `**나이:** ${age}세` : "", "",
+              `## 📋 무료 지원 정책 (${policies.length}개)`,
+              policies.slice(0, 10).map(formatPolicyBrief).join("\n") || "_없음_",
+              includeCenters ? `\n## 🏢 무료 상담 센터 (${centers.length}개)\n${centers.map(formatCenterBrief).join("\n") || "_없음_"}` : "",
+              includeTraining ? `\n## 📚 국비 훈련 (${courses.length}개)\n${courses.map(formatTrainingCourse).join("\n") || "_없음_"}` : "",
+            ].filter(l => l !== "").join("\n");
+            break;
+          }
+
+          case "search_youth_policies": {
+            const { keyword, region, category } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+            const zipCd = regionCode ? (regionCode.length === 2 ? `${regionCode}000` : regionCode) : undefined;
+            const data = await fetchYouthPolicies({
+              pageNum: "1", pageSize: "10", pageType: "1",
+              ...(keyword && { plcyNm: keyword }), ...(zipCd && { zipCd }), ...(category && { plcyTp: category })
+            });
+            const policies = data.result?.youthPolicyList || [];
+            result = `# 청년정책 검색 결과 (${policies.length}개)\n\n` + policies.map(formatPolicyBrief).join("\n");
+            break;
+          }
+
+          case "get_policy_detail": {
+            const { policyNo } = args || {};
+            const data = await fetchYouthPolicies({ pageNum: "1", pageSize: "100", pageType: "1" });
+            const policy = (data.result?.youthPolicyList || []).find((p: any) => p.plcyNo === policyNo);
+            result = policy ? formatPolicyDetailed(policy) : "정책을 찾을 수 없습니다.";
+            break;
+          }
+
+          case "search_youth_centers": {
+            const { region } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+            const data = await fetchYouthCenters({
+              pageNum: "1", pageSize: "20",
+              ...(regionCode && { ctpvCd: regionCode.substring(0, 2) })
+            });
+            const centers = data.result?.youthPolicyList || [];
+            result = `# 청년센터 검색 결과 (${centers.length}개)\n\n` + centers.map(formatCenterBrief).join("\n");
+            break;
+          }
+
+          case "recommend_policies_by_age": {
+            const { age, region } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+            const zipCd = regionCode ? (regionCode.length === 2 ? `${regionCode}000` : regionCode) : undefined;
+            const data = await fetchYouthPolicies({
+              pageNum: "1", pageSize: "50", pageType: "1", ...(zipCd && { zipCd })
+            });
+            const policies = filterPoliciesByAge(data.result?.youthPolicyList || [], age);
+            result = `# ${age}세 맞춤 정책 (${policies.length}개)\n\n` + policies.slice(0, 10).map(formatPolicyBrief).join("\n");
+            break;
+          }
+
+          case "search_job_postings": {
+            const { keyword, region } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+            const jobs = await fetchJobPostings({
+              startPage: "1", display: "10", ...(keyword && { keyword }),
+              ...(regionCode && { region: regionCode.length === 2 ? `${regionCode}000` : regionCode })
+            });
+            result = `# 채용정보 검색 결과 (${jobs.length}개)\n\n` + jobs.map(formatJobPosting).join("\n");
+            break;
+          }
+
+          case "search_small_giant_companies": {
+            const { region } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+            const companies = await fetchSmallGiantCompanies({
+              startPage: "1", display: "10", ...(regionCode && { region: regionCode })
+            });
+            result = `# 청년친화강소기업 (${companies.length}개)\n\n` + companies.map(formatSmallGiant).join("\n");
+            break;
+          }
+
+          case "search_training_courses": {
+            const { region, keyword } = args || {};
+            const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+            const courses = await fetchTrainingCourses({
+              pageNum: "1", pageSize: "10",
+              srchTraStDt: getDateString(), srchTraEndDt: getDateString(90),
+              ...(keyword && { srchTraNm: keyword }),
+              ...(regionCode && { srchTraArea1: regionCode.substring(0, 2) })
+            });
+            result = `# 훈련과정 검색 결과 (${courses.length}개)\n\n` + courses.map(formatTrainingCourse).join("\n");
+            break;
+          }
+
+          case "get_help": {
+            result = `# 청년친구 MCP v3.1 도움말
+
+## 🔥 통합 도구 (NEW!)
+- **mega_search**: 키워드로 모든 API 통합 검색
+- **employment_full_package**: 취업 풀패키지
+- **training_job_bridge**: 훈련→채용 NCS 브릿지
+- **personalized_recommendations**: 맞춤 필터링
+- **small_giant_package**: 강소기업 패키지
+- **urgent_deadlines**: 마감 임박 긴급모드
+- **zero_cost_plan**: 비용 제로 플랜
+
+## 기본 도구
+- search_youth_policies, get_policy_detail
+- search_youth_centers, recommend_policies_by_age
+- search_job_postings, search_small_giant_companies
+- search_training_courses`;
+            break;
+          }
+
+          default:
+            return res.json({
+              jsonrpc: "2.0", id: body.id,
+              error: { code: -32601, message: `Unknown tool: ${name}` }
+            });
+        }
+
+        return res.json({
+          jsonrpc: "2.0", id: body.id,
+          result: { content: [{ type: "text", text: result }] }
+        });
+      } catch (error) {
+        console.error("tools/call error:", error);
+        return res.json({
+          jsonrpc: "2.0", id: body.id,
+          result: { content: [{ type: "text", text: `오류: ${error instanceof Error ? error.message : "알 수 없는 오류"}` }], isError: true }
+        });
+      }
+    }
+
     if (body.method === "tools/list") {
       // 도구 목록 반환
       return res.json({
