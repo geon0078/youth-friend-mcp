@@ -591,7 +591,94 @@ const server = new McpServer({
 });
 
 // ============================================
-// 기본 검색 도구 (기존 14개)
+// 도구 등록 함수 (HTTP 모드용)
+// ============================================
+
+function registerAllTools(mcpServer: McpServer) {
+  // 도구 1: 청년정책 검색
+  mcpServer.tool(
+    "search_youth_policies",
+    "청년정책을 검색합니다. 키워드, 지역, 분류 등으로 검색할 수 있습니다.",
+    {
+      keyword: z.string().optional().describe("검색 키워드 (정책명에서 검색)"),
+      region: z.string().optional().describe("지역명 또는 지역코드 (예: 서울, 부산, 11, 26)"),
+      category: z.string().optional().describe("정책 대분류 (일자리, 주거, 교육, 복지문화, 참여권리)"),
+      subcategory: z.string().optional().describe("정책 중분류"),
+      pageNum: z.number().optional().default(1).describe("페이지 번호"),
+      pageSize: z.number().optional().default(10).describe("페이지 크기 (최대 100)"),
+    },
+    async ({ keyword, region, category, subcategory, pageNum, pageSize }) => {
+      try {
+        const params: Record<string, string> = {
+          pageNum: String(pageNum || 1),
+          pageSize: String(Math.min(pageSize || 10, 100)),
+          pageType: "1",
+        };
+
+        if (keyword) params.plcyNm = keyword;
+        if (region) {
+          const regionCode = REGION_CODES[region] || region;
+          params.zipCd = regionCode.length === 2 ? `${regionCode}000` : regionCode;
+        }
+        if (category) params.lclsfNm = category;
+        if (subcategory) params.mclsfNm = subcategory;
+
+        const data = await fetchYouthPolicies(params);
+        const policies = data.result.youthPolicyList || [];
+        const totalCount = data.result.pagging.totCount;
+
+        if (policies.length === 0) {
+          return { content: [{ type: "text" as const, text: "검색 결과가 없습니다. 다른 검색 조건을 시도해보세요." }] };
+        }
+
+        const result = [
+          `# 청년정책 검색 결과`,
+          `총 **${totalCount}개** 중 ${policies.length}개 표시 (페이지 ${pageNum})`,
+          ``,
+          ...policies.map(formatPolicyBrief),
+        ].join("\n");
+
+        return { content: [{ type: "text" as const, text: result }] };
+      } catch (error) {
+        return { content: [{ type: "text" as const, text: `오류 발생: ${error instanceof Error ? error.message : "알 수 없는 오류"}` }], isError: true };
+      }
+    }
+  );
+
+  // 도구 2: 도움말
+  mcpServer.tool(
+    "get_help",
+    "청년친구 MCP v3.0 사용법과 기능을 안내합니다.",
+    {},
+    async () => {
+      const helpText = [
+        `# 청년친구 MCP v3.0 도움말`,
+        ``,
+        `## 사용 가능한 기능 (22개 도구)`,
+        ``,
+        `### 온통청년 - 정책/센터`,
+        `- search_youth_policies: 청년정책 검색`,
+        `- get_policy_detail: 정책 상세 조회`,
+        `- search_youth_centers: 청년센터 검색`,
+        `- recommend_policies_by_age: 나이 기반 정책 추천`,
+        ``,
+        `### 고용24 - 채용/기업/훈련`,
+        `- search_job_postings: 워크넷 채용정보 검색`,
+        `- search_small_giant_companies: 청년친화강소기업 검색`,
+        `- search_training_courses: 국민내일배움카드 훈련과정 검색`,
+        ``,
+        `### 통합 검색`,
+        `- search_region_all: 지역 기반 올인원 검색`,
+        `- get_survival_kit: 청년 생존키트 (맞춤 패키지)`,
+      ].join("\n");
+
+      return { content: [{ type: "text" as const, text: helpText }] };
+    }
+  );
+}
+
+// ============================================
+// 기본 검색 도구 (기존 14개) - stdio 모드용
 // ============================================
 
 // 도구 1: 청년정책 검색
@@ -1673,7 +1760,178 @@ async function startHttpServer() {
     });
   });
 
-  // SSE 엔드포인트 - GET (SSE 스트림 연결)
+  // MCP 엔드포인트 - POST /sse (JSON-RPC 직접 처리)
+  app.post("/sse", async (req: Request, res: Response) => {
+    const body = req.body;
+    console.log("POST /sse - MCP 요청:", JSON.stringify(body));
+
+    // JSON-RPC 요청 처리
+    if (body.method === "initialize") {
+      // initialize 응답
+      return res.json({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: {
+          protocolVersion: "2024-11-05",
+          capabilities: {
+            tools: { listChanged: false }
+          },
+          serverInfo: {
+            name: "youth-friend-mcp",
+            version: "3.0.0"
+          }
+        }
+      });
+    }
+
+    if (body.method === "initialized") {
+      // initialized는 알림이므로 응답 없음
+      return res.status(204).send();
+    }
+
+    if (body.method === "tools/list") {
+      // 도구 목록 반환
+      return res.json({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: {
+          tools: [
+            {
+              name: "search_youth_policies",
+              description: "청년정책을 검색합니다. 키워드, 지역, 분류 등으로 검색할 수 있습니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  keyword: { type: "string", description: "검색 키워드" },
+                  region: { type: "string", description: "지역명 (서울, 부산 등)" },
+                  category: { type: "string", description: "정책 분류 (일자리, 주거, 교육 등)" }
+                }
+              }
+            },
+            {
+              name: "get_policy_detail",
+              description: "정책번호로 청년정책의 상세 정보를 조회합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  policyNo: { type: "string", description: "정책번호" }
+                },
+                required: ["policyNo"]
+              }
+            },
+            {
+              name: "search_youth_centers",
+              description: "전국 청년센터를 검색합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  region: { type: "string", description: "지역명" }
+                }
+              }
+            },
+            {
+              name: "recommend_policies_by_age",
+              description: "나이에 맞는 청년정책을 추천합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  age: { type: "number", description: "만 나이" },
+                  region: { type: "string", description: "지역명" }
+                },
+                required: ["age"]
+              }
+            },
+            {
+              name: "search_job_postings",
+              description: "워크넷 채용정보를 검색합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  keyword: { type: "string", description: "검색 키워드" },
+                  region: { type: "string", description: "근무지역" }
+                }
+              }
+            },
+            {
+              name: "search_small_giant_companies",
+              description: "청년친화강소기업을 검색합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  region: { type: "string", description: "지역명" }
+                }
+              }
+            },
+            {
+              name: "search_training_courses",
+              description: "국민내일배움카드 훈련과정을 검색합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  region: { type: "string", description: "훈련지역" },
+                  keyword: { type: "string", description: "과정명 키워드" }
+                }
+              }
+            },
+            {
+              name: "search_region_all",
+              description: "지역 기반으로 정책, 센터, 채용, 훈련, 강소기업을 통합 검색합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  region: { type: "string", description: "지역명" }
+                },
+                required: ["region"]
+              }
+            },
+            {
+              name: "get_survival_kit",
+              description: "청년 상황에 맞는 정책, 센터, 훈련 패키지를 한 번에 제공합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  age: { type: "number", description: "만 나이" },
+                  region: { type: "string", description: "지역명" }
+                },
+                required: ["age", "region"]
+              }
+            },
+            {
+              name: "get_help",
+              description: "청년친구 MCP v3.0 사용법과 기능을 안내합니다.",
+              inputSchema: { type: "object", properties: {} }
+            }
+          ]
+        }
+      });
+    }
+
+    // SSE 세션 기반 메시지 처리 (세션이 있는 경우)
+    const sessionId = req.query.sessionId as string;
+    if (sessionId) {
+      const transport = sessions.get(sessionId);
+      if (transport) {
+        try {
+          await transport.handlePostMessage(req, res);
+          return;
+        } catch (error) {
+          console.error("메시지 처리 오류:", error);
+        }
+      }
+    }
+
+    // 알 수 없는 메서드
+    return res.json({
+      jsonrpc: "2.0",
+      id: body.id || null,
+      error: {
+        code: -32601,
+        message: `Method not found: ${body.method}`
+      }
+    });
+  });
+
+  // GET /sse - SSE 스트림 연결
   app.get("/sse", async (req: Request, res: Response) => {
     console.log("GET /sse - SSE 연결 요청");
 
@@ -1696,39 +1954,6 @@ async function startHttpServer() {
     }
   });
 
-  // SSE 엔드포인트 - POST (메시지 처리)
-  app.post("/sse", async (req: Request, res: Response) => {
-    const sessionId = req.query.sessionId as string;
-    console.log(`POST /sse - 메시지 수신, 세션: ${sessionId}`);
-
-    const transport = sessions.get(sessionId);
-    if (!transport) {
-      console.error(`세션을 찾을 수 없음: ${sessionId}`);
-      return res.status(404).json({
-        jsonrpc: "2.0",
-        error: {
-          code: -32000,
-          message: "세션을 찾을 수 없습니다"
-        },
-        id: null
-      });
-    }
-
-    try {
-      await transport.handlePostMessage(req, res);
-    } catch (error) {
-      console.error("메시지 처리 오류:", error);
-      res.status(500).json({
-        jsonrpc: "2.0",
-        error: {
-          code: -32603,
-          message: "메시지 처리 중 오류 발생"
-        },
-        id: null
-      });
-    }
-  });
-
   // 루트 경로 - API 정보
   app.get("/", (req: Request, res: Response) => {
     res.json({
@@ -1743,7 +1968,7 @@ async function startHttpServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`청년친구 MCP 서버 v3.0이 시작되었습니다. (HTTP/SSE 모드, 포트: ${PORT})`);
-    console.log(`SSE 엔드포인트: GET /sse (연결), POST /sse (메시지)`);
+    console.log(`MCP 엔드포인트: GET /sse (SSE), POST /sse (JSON-RPC)`);
   });
 }
 
