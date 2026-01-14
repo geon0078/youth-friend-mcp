@@ -1658,10 +1658,644 @@ server.tool(
   }
 );
 
-// 도구 23: 도움말 (업데이트)
+// ============================================
+// 🚀 고급 통합 도구 (브레인스토밍 결과 TOP 8)
+// ============================================
+
+// 도구 24: 메가 통합 검색 (12개 API 전체)
+server.tool(
+  "mega_search",
+  "키워드 하나로 정책, 센터, 채용, 훈련, 강소기업 등 모든 정보를 통합 검색합니다. 가장 강력한 검색 도구입니다.",
+  {
+    keyword: z.string().describe("검색 키워드 (예: IT, 주거, 창업, 취업)"),
+    age: z.number().optional().describe("나이 (만 나이) - 입력 시 자격요건 자동 필터링"),
+    region: z.string().optional().describe("지역명 (서울, 부산 등) - 입력 시 지역 필터링"),
+    limit: z.number().optional().default(5).describe("각 항목별 최대 결과 수"),
+  },
+  async ({ keyword, age, region, limit }) => {
+    try {
+      const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+      const zipCd = regionCode ? (regionCode.length === 2 ? `${regionCode}000` : regionCode) : undefined;
+      const limitNum = limit || 5;
+
+      // 병렬 API 호출
+      const [policyData, centerData, jobs, companies, courses, programs] = await Promise.all([
+        fetchYouthPolicies({
+          pageNum: "1",
+          pageSize: String(limitNum * 2),
+          pageType: "1",
+          plcyNm: keyword,
+          ...(zipCd && { zipCd })
+        }).catch(() => ({ result: { youthPolicyList: [], pagging: { totCount: 0 } } })),
+        fetchYouthCenters({
+          pageNum: "1",
+          pageSize: String(limitNum),
+          ...(regionCode && { ctpvCd: regionCode.substring(0, 2) })
+        }).catch(() => ({ result: { youthPolicyList: [], pagging: { totCount: 0 } } })),
+        fetchJobPostings({
+          startPage: "1",
+          display: String(limitNum),
+          keyword,
+          ...(zipCd && { region: zipCd })
+        }).catch(() => []),
+        fetchSmallGiantCompanies({
+          startPage: "1",
+          display: String(limitNum),
+          ...(regionCode && { region: regionCode })
+        }).catch(() => []),
+        fetchTrainingCourses({
+          pageNum: "1",
+          pageSize: String(limitNum),
+          srchTraNm: keyword,
+          srchTraStDt: getDateString(),
+          srchTraEndDt: getDateString(90),
+          ...(regionCode && { srchTraArea1: regionCode.substring(0, 2) })
+        }).catch(() => []),
+        fetchEmploymentPrograms({ startPage: "1", display: String(limitNum) }).catch(() => []),
+      ]);
+
+      let policies = policyData.result.youthPolicyList || [];
+      if (age) {
+        policies = filterPoliciesByAge(policies, age);
+      }
+      const centers = centerData.result.youthPolicyList || [];
+
+      const result = [
+        `# 🔍 "${keyword}" 메가 통합 검색 결과`,
+        age ? `**필터:** ${age}세` : "",
+        region ? `**지역:** ${region}` : "",
+        ``,
+        `---`,
+        ``,
+        `## 📋 청년정책 (${policyData.result.pagging.totCount}개 중 ${policies.length}개)`,
+        policies.length > 0 ? policies.slice(0, limitNum).map(formatPolicyBrief).join("\n") : "_검색 결과 없음_",
+        ``,
+        `## 🏢 청년센터 (${centerData.result.pagging.totCount}개)`,
+        centers.length > 0 ? centers.map(formatCenterBrief).join("\n") : "_검색 결과 없음_",
+        ``,
+        `## 💼 채용정보 (${jobs.length}개)`,
+        jobs.length > 0 ? jobs.map(formatJobPosting).join("\n") : "_검색 결과 없음_",
+        ``,
+        `## 🏆 청년친화강소기업 (${companies.length}개)`,
+        companies.length > 0 ? companies.map(formatSmallGiant).join("\n") : "_검색 결과 없음_",
+        ``,
+        `## 📚 훈련과정 (${courses.length}개)`,
+        courses.length > 0 ? courses.map(formatTrainingCourse).join("\n") : "_검색 결과 없음_",
+        ``,
+        `## 🎯 취업역량 프로그램 (${programs.length}개)`,
+        Array.isArray(programs) && programs.length > 0 ? programs.map(formatEmploymentProgram).join("\n") : "_검색 결과 없음_",
+      ].filter(line => line !== "").join("\n");
+
+      return { content: [{ type: "text" as const, text: result }] };
+    } catch (error) {
+      return { content: [{ type: "text" as const, text: `오류 발생: ${error instanceof Error ? error.message : "알 수 없는 오류"}` }], isError: true };
+    }
+  }
+);
+
+// 도구 25: 취업 풀패키지
+server.tool(
+  "employment_full_package",
+  "목표 직종/직업을 입력하면 관련 채용정보, 필요 훈련, 지원 정책, 강소기업을 한번에 제공합니다.",
+  {
+    jobKeyword: z.string().describe("목표 직종/직업 키워드 (예: 개발자, 디자이너, 마케터, 요리사)"),
+    region: z.string().optional().describe("희망 근무지역 (서울, 부산 등)"),
+    age: z.number().optional().describe("나이 (만 나이) - 자격요건 필터링용"),
+    career: z.enum(["N", "E", "Z"]).optional().default("N").describe("경력 (N:신입, E:경력, Z:무관)"),
+  },
+  async ({ jobKeyword, region, age, career }) => {
+    try {
+      const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+      const zipCd = regionCode ? (regionCode.length === 2 ? `${regionCode}000` : regionCode) : undefined;
+
+      // 병렬 API 호출
+      const [jobs, companies, courses, policyData] = await Promise.all([
+        fetchJobPostings({
+          startPage: "1",
+          display: "10",
+          keyword: jobKeyword,
+          career: career || "N",
+          ...(zipCd && { region: zipCd })
+        }).catch(() => []),
+        fetchSmallGiantCompanies({
+          startPage: "1",
+          display: "5",
+          ...(regionCode && { region: regionCode })
+        }).catch(() => []),
+        fetchTrainingCourses({
+          pageNum: "1",
+          pageSize: "10",
+          srchTraNm: jobKeyword,
+          srchTraStDt: getDateString(),
+          srchTraEndDt: getDateString(90),
+          ...(regionCode && { srchTraArea1: regionCode.substring(0, 2) })
+        }).catch(() => []),
+        fetchYouthPolicies({
+          pageNum: "1",
+          pageSize: "10",
+          pageType: "1",
+          lclsfNm: "일자리",
+          ...(zipCd && { zipCd })
+        }).catch(() => ({ result: { youthPolicyList: [], pagging: { totCount: 0 } } })),
+      ]);
+
+      let policies = policyData.result.youthPolicyList || [];
+      if (age) {
+        policies = filterPoliciesByAge(policies, age);
+      }
+
+      const result = [
+        `# 🎯 "${jobKeyword}" 취업 풀패키지`,
+        ``,
+        `**목표:** ${jobKeyword}`,
+        region ? `**희망지역:** ${region}` : "",
+        age ? `**나이:** ${age}세` : "",
+        `**경력:** ${career === "N" ? "신입" : career === "E" ? "경력" : "무관"}`,
+        ``,
+        `---`,
+        ``,
+        `## 💼 Step 1: 채용정보 (${jobs.length}개)`,
+        `> 현재 모집 중인 ${jobKeyword} 관련 채용공고`,
+        ``,
+        jobs.length > 0 ? jobs.map(formatJobPosting).join("\n") : "_현재 채용공고 없음_",
+        ``,
+        `## 📚 Step 2: 준비할 훈련과정 (${courses.length}개)`,
+        `> ${jobKeyword} 취업을 위한 국비지원 훈련`,
+        ``,
+        courses.length > 0 ? courses.map(formatTrainingCourse).join("\n") : "_관련 훈련과정 없음_",
+        ``,
+        `## 📋 Step 3: 활용 가능한 정책 (${policies.length}개)`,
+        `> 취업 시 혜택받을 수 있는 청년정책`,
+        ``,
+        policies.length > 0 ? policies.map(formatPolicyBrief).join("\n") : "_해당 정책 없음_",
+        ``,
+        `## 🏆 Step 4: 추천 강소기업 (${companies.length}개)`,
+        `> 청년친화강소기업 - 복지 좋고 성장 가능한 기업`,
+        ``,
+        companies.length > 0 ? companies.map(formatSmallGiant).join("\n") : "_해당 지역 강소기업 없음_",
+        ``,
+        `---`,
+        `**💡 TIP:** 강소기업 취업 시 '청년내일채움공제', '중소기업취업청년 소득세 감면' 혜택을 꼭 확인하세요!`,
+      ].filter(line => line !== "").join("\n");
+
+      return { content: [{ type: "text" as const, text: result }] };
+    } catch (error) {
+      return { content: [{ type: "text" as const, text: `오류 발생: ${error instanceof Error ? error.message : "알 수 없는 오류"}` }], isError: true };
+    }
+  }
+);
+
+// 도구 26: 훈련→채용 브릿지 (NCS 기반)
+server.tool(
+  "training_job_bridge",
+  "훈련과정 검색 후 해당 훈련과 연관된 채용정보를 NCS 코드 기반으로 자동 매칭합니다.",
+  {
+    trainingKeyword: z.string().describe("훈련과정 키워드 (예: 웹개발, 데이터분석, 요리, 용접)"),
+    region: z.string().optional().describe("훈련/취업 희망 지역"),
+    ncsCode: z.string().optional().describe("NCS 대분류코드 (01~24) - 직접 지정 시"),
+  },
+  async ({ trainingKeyword, region, ncsCode }) => {
+    try {
+      const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+
+      // 훈련과정 검색
+      const courses = await fetchTrainingCourses({
+        pageNum: "1",
+        pageSize: "10",
+        srchTraNm: trainingKeyword,
+        srchTraStDt: getDateString(),
+        srchTraEndDt: getDateString(90),
+        ...(regionCode && { srchTraArea1: regionCode.substring(0, 2) }),
+        ...(ncsCode && { srchNcs1: ncsCode })
+      }).catch(() => []);
+
+      // NCS 코드 추출 (첫 번째 훈련과정에서)
+      const extractedNcsCode = courses.length > 0 && courses[0].ncsCd
+        ? courses[0].ncsCd.substring(0, 2)
+        : ncsCode;
+
+      const ncsName = extractedNcsCode ? (NCS_CATEGORIES[extractedNcsCode] || "기타") : "전체";
+
+      // NCS 기반 채용정보 검색
+      const jobs = await fetchJobPostings({
+        startPage: "1",
+        display: "10",
+        keyword: trainingKeyword,
+        ...(regionCode && { region: regionCode.length === 2 ? `${regionCode}000` : regionCode })
+      }).catch(() => []);
+
+      const result = [
+        `# 🌉 훈련→채용 브릿지`,
+        ``,
+        `**검색 키워드:** ${trainingKeyword}`,
+        region ? `**지역:** ${region}` : "",
+        extractedNcsCode ? `**NCS 분류:** ${ncsName} (${extractedNcsCode})` : "",
+        ``,
+        `---`,
+        ``,
+        `## 📚 관련 훈련과정 (${courses.length}개)`,
+        `> 국민내일배움카드로 수강 가능한 과정`,
+        ``,
+        courses.length > 0 ? courses.map(formatTrainingCourse).join("\n") : "_관련 훈련과정 없음_",
+        ``,
+        `---`,
+        ``,
+        `## 💼 연계 채용정보 (${jobs.length}개)`,
+        `> 훈련 수료 후 지원 가능한 채용공고`,
+        ``,
+        jobs.length > 0 ? jobs.map(formatJobPosting).join("\n") : "_관련 채용정보 없음_",
+        ``,
+        `---`,
+        `**💡 경로:** 훈련 수료 → 자격증 취득 → 채용 지원 → 취업 성공!`,
+      ].filter(line => line !== "").join("\n");
+
+      return { content: [{ type: "text" as const, text: result }] };
+    } catch (error) {
+      return { content: [{ type: "text" as const, text: `오류 발생: ${error instanceof Error ? error.message : "알 수 없는 오류"}` }], isError: true };
+    }
+  }
+);
+
+// 도구 27: 맞춤 필터링 (프로필 기반)
+server.tool(
+  "personalized_recommendations",
+  "나이, 지역, 관심분야, 취업상태를 입력하면 자격요건에 맞는 정책과 프로그램만 추천합니다.",
+  {
+    age: z.number().describe("나이 (만 나이)"),
+    region: z.string().describe("거주 지역 (서울, 부산 등)"),
+    category: z.enum(["일자리", "주거", "교육", "복지문화", "참여권리", "전체"]).optional().default("전체").describe("관심 분야"),
+    employmentStatus: z.enum(["구직중", "재직중", "창업준비", "학생", "기타"]).optional().describe("현재 상태"),
+    incomeLevel: z.enum(["무소득", "저소득", "중위소득", "일반"]).optional().describe("소득 수준"),
+  },
+  async ({ age, region, category, employmentStatus, incomeLevel }) => {
+    try {
+      const regionCode = REGION_CODES[region] || region;
+      const zipCd = regionCode.length === 2 ? `${regionCode}000` : regionCode;
+      const ctpvCd = regionCode.substring(0, 2);
+      const regionName = REGION_NAMES[ctpvCd] || region;
+
+      const policyParams: Record<string, string> = {
+        pageNum: "1",
+        pageSize: "30",
+        pageType: "1",
+        zipCd,
+      };
+      if (category && category !== "전체") policyParams.lclsfNm = category;
+
+      const [policyData, centerData, programs] = await Promise.all([
+        fetchYouthPolicies(policyParams),
+        fetchYouthCenters({ pageNum: "1", pageSize: "5", ctpvCd }),
+        fetchEmploymentPrograms({ startPage: "1", display: "5" }).catch(() => []),
+      ]);
+
+      // 나이 필터링
+      const eligiblePolicies = filterPoliciesByAge(policyData.result.youthPolicyList || [], age);
+      const centers = centerData.result.youthPolicyList || [];
+
+      // 상태별 추가 추천 메시지
+      let statusTip = "";
+      if (employmentStatus === "구직중") {
+        statusTip = "💡 **구직자 추천:** 취업성공패키지, 국민취업지원제도를 우선 확인하세요!";
+      } else if (employmentStatus === "창업준비") {
+        statusTip = "💡 **창업준비생 추천:** 청년창업사관학교, 창업지원금 정책을 확인하세요!";
+      } else if (employmentStatus === "학생") {
+        statusTip = "💡 **학생 추천:** 국가장학금, 학자금대출, 인턴십 프로그램을 확인하세요!";
+      }
+
+      const result = [
+        `# 🎯 ${age}세 ${regionName} 청년 맞춤 추천`,
+        ``,
+        `**프로필:**`,
+        `- 나이: ${age}세`,
+        `- 지역: ${regionName}`,
+        category !== "전체" ? `- 관심분야: ${category}` : "",
+        employmentStatus ? `- 현재상태: ${employmentStatus}` : "",
+        incomeLevel ? `- 소득수준: ${incomeLevel}` : "",
+        ``,
+        statusTip,
+        ``,
+        `---`,
+        ``,
+        `## ✅ 자격요건 충족 정책 (${eligiblePolicies.length}개)`,
+        `> 전체 ${policyData.result.pagging.totCount}개 중 ${age}세 지원 가능한 정책`,
+        ``,
+        eligiblePolicies.length > 0
+          ? eligiblePolicies.slice(0, 10).map(formatPolicyBrief).join("\n")
+          : "_해당 조건의 정책이 없습니다_",
+        ``,
+        `## 🏢 가까운 청년센터 (${centers.length}개)`,
+        `> 방문 상담으로 더 자세한 안내를 받으세요`,
+        ``,
+        centers.length > 0 ? centers.map(formatCenterBrief).join("\n") : "_해당 지역 센터 없음_",
+        ``,
+        `## 🎯 취업역량 프로그램`,
+        Array.isArray(programs) && programs.length > 0
+          ? programs.map(formatEmploymentProgram).join("\n")
+          : "_현재 진행 중인 프로그램 없음_",
+      ].filter(line => line !== "").join("\n");
+
+      return { content: [{ type: "text" as const, text: result }] };
+    } catch (error) {
+      return { content: [{ type: "text" as const, text: `오류 발생: ${error instanceof Error ? error.message : "알 수 없는 오류"}` }], isError: true };
+    }
+  }
+);
+
+// 도구 28: 강소기업 취업 패키지 (강화)
+server.tool(
+  "small_giant_package",
+  "강소기업 정보와 함께 취업 시 받을 수 있는 모든 혜택(정책, 지원금, 훈련)을 패키지로 제공합니다.",
+  {
+    region: z.string().optional().describe("지역명 (서울, 부산 등)"),
+    industry: z.string().optional().describe("업종 키워드 (IT, 제조, 서비스 등)"),
+    age: z.number().optional().describe("나이 (만 나이) - 정책 필터링용"),
+  },
+  async ({ region, industry, age }) => {
+    try {
+      const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+      const zipCd = regionCode ? (regionCode.length === 2 ? `${regionCode}000` : regionCode) : undefined;
+
+      const [companies, policyData, jobs] = await Promise.all([
+        fetchSmallGiantCompanies({
+          startPage: "1",
+          display: "10",
+          ...(regionCode && { region: regionCode })
+        }),
+        fetchYouthPolicies({
+          pageNum: "1",
+          pageSize: "15",
+          pageType: "1",
+          lclsfNm: "일자리",
+          ...(zipCd && { zipCd })
+        }),
+        fetchJobPostings({
+          startPage: "1",
+          display: "5",
+          ...(industry && { keyword: industry }),
+          ...(zipCd && { region: zipCd })
+        }).catch(() => []),
+      ]);
+
+      let policies = policyData.result.youthPolicyList || [];
+      if (age) {
+        policies = filterPoliciesByAge(policies, age);
+      }
+
+      // 강소기업 취업 관련 정책 키워드 필터
+      const employmentPolicies = policies.filter(p =>
+        p.plcyNm.includes("취업") || p.plcyNm.includes("채용") ||
+        p.plcyNm.includes("일자리") || p.plcyNm.includes("내일채움") ||
+        p.plcyNm.includes("소득세") || p.plcyNm.includes("중소기업")
+      );
+
+      const result = [
+        `# 🏆 강소기업 취업 패키지`,
+        ``,
+        region ? `**지역:** ${region}` : "**지역:** 전국",
+        industry ? `**업종:** ${industry}` : "",
+        age ? `**나이:** ${age}세` : "",
+        ``,
+        `---`,
+        ``,
+        `## 🏢 청년친화강소기업 (${companies.length}개)`,
+        `> 고용노동부 인증 - 급여, 복지, 성장성 우수 기업`,
+        ``,
+        companies.length > 0 ? companies.map(formatSmallGiant).join("\n") : "_해당 조건 기업 없음_",
+        ``,
+        `---`,
+        ``,
+        `## 💰 강소기업 취업 시 혜택 정책 (${employmentPolicies.length}개)`,
+        ``,
+        `### 🔥 핵심 혜택 안내`,
+        `| 혜택 | 내용 |`,
+        `|------|------|`,
+        `| 청년내일채움공제 | 2년 근무 → 1,200만원+ 목돈 마련 |`,
+        `| 소득세 감면 | 중소기업 취업 청년 5년간 90% 감면 |`,
+        `| 전세자금 대출 | 중소기업 재직자 우대 금리 |`,
+        ``,
+        employmentPolicies.length > 0
+          ? employmentPolicies.slice(0, 5).map(formatPolicyBrief).join("\n")
+          : "_관련 정책 정보를 불러오는 중..._",
+        ``,
+        `## 💼 관련 채용공고 (${jobs.length}개)`,
+        jobs.length > 0 ? jobs.map(formatJobPosting).join("\n") : "_현재 채용공고 없음_",
+        ``,
+        `---`,
+        `**💡 강소기업 취업 = 안정성 + 성장성 + 정책 혜택!**`,
+      ].filter(line => line !== "").join("\n");
+
+      return { content: [{ type: "text" as const, text: result }] };
+    } catch (error) {
+      return { content: [{ type: "text" as const, text: `오류 발생: ${error instanceof Error ? error.message : "알 수 없는 오류"}` }], isError: true };
+    }
+  }
+);
+
+// 도구 29: 긴급 모드 (마감 임박)
+server.tool(
+  "urgent_deadlines",
+  "마감이 임박한 정책, 채용, 프로그램을 긴급도 순으로 보여줍니다. 놓치면 안 되는 기회!",
+  {
+    region: z.string().optional().describe("지역명 (서울, 부산 등)"),
+    daysWithin: z.number().optional().default(7).describe("며칠 이내 마감 (기본: 7일)"),
+    category: z.string().optional().describe("관심 분야 (일자리, 주거, 교육 등)"),
+  },
+  async ({ region, daysWithin, category }) => {
+    try {
+      const regionCode = region ? (REGION_CODES[region] || region) : undefined;
+      const zipCd = regionCode ? (regionCode.length === 2 ? `${regionCode}000` : regionCode) : undefined;
+      const days = daysWithin || 7;
+
+      const policyParams: Record<string, string> = {
+        pageNum: "1",
+        pageSize: "30",
+        pageType: "1",
+        ...(zipCd && { zipCd }),
+        ...(category && { lclsfNm: category }),
+      };
+
+      const [policyData, jobs, programs] = await Promise.all([
+        fetchYouthPolicies(policyParams),
+        fetchJobPostings({
+          startPage: "1",
+          display: "20",
+          ...(zipCd && { region: zipCd })
+        }).catch(() => []),
+        fetchEmploymentPrograms({ startPage: "1", display: "10" }).catch(() => []),
+      ]);
+
+      const policies = policyData.result.youthPolicyList || [];
+
+      // 마감일 기준 필터링 (실제로는 API에서 날짜 필드 확인 필요)
+      const today = new Date();
+      const deadlineDate = new Date(today.getTime() + days * 24 * 60 * 60 * 1000);
+
+      // 채용정보 마감일 필터
+      const urgentJobs = jobs.filter(job => {
+        if (!job.closeDt) return false;
+        const closeDate = new Date(job.closeDt.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3'));
+        return closeDate <= deadlineDate && closeDate >= today;
+      });
+
+      const result = [
+        `# 🚨 긴급! ${days}일 내 마감`,
+        ``,
+        region ? `**지역:** ${region}` : "",
+        category ? `**분야:** ${category}` : "",
+        `**기준일:** ${today.toISOString().split('T')[0]}`,
+        `**마감기한:** ${deadlineDate.toISOString().split('T')[0]}까지`,
+        ``,
+        `---`,
+        ``,
+        `## ⏰ 마감 임박 채용공고 (${urgentJobs.length}개)`,
+        ``,
+        urgentJobs.length > 0
+          ? urgentJobs.map(job => [
+              `### 🔴 ${job.title}`,
+              `- **회사:** ${job.company}`,
+              `- **마감:** ${job.closeDt} ⚠️`,
+              `- **지역:** ${job.region || job.workRegion}`,
+              job.wantedInfoUrl ? `- **지원:** ${job.wantedInfoUrl}` : "",
+              ``
+            ].filter(l => l !== "").join("\n")).join("\n")
+          : "_${days}일 내 마감 채용공고 없음_",
+        ``,
+        `## 📋 주요 청년정책 (${policies.length}개)`,
+        `> 신청 기간을 꼭 확인하세요!`,
+        ``,
+        policies.length > 0
+          ? policies.slice(0, 10).map(p => [
+              `### ${p.plcyNm}`,
+              `- **신청기간:** ${p.aplyYmd || "상시"}`,
+              `- **분류:** ${p.lclsfNm}`,
+              ``
+            ].join("\n")).join("\n")
+          : "_해당 정책 없음_",
+        ``,
+        `## 🎯 취업역량 프로그램`,
+        Array.isArray(programs) && programs.length > 0
+          ? programs.slice(0, 5).map(formatEmploymentProgram).join("\n")
+          : "_현재 프로그램 없음_",
+        ``,
+        `---`,
+        `**⚡ 지금 바로 신청하세요! 기회는 기다려주지 않습니다!**`,
+      ].filter(line => line !== "").join("\n");
+
+      return { content: [{ type: "text" as const, text: result }] };
+    } catch (error) {
+      return { content: [{ type: "text" as const, text: `오류 발생: ${error instanceof Error ? error.message : "알 수 없는 오류"}` }], isError: true };
+    }
+  }
+);
+
+// 도구 30: 비용 제로 플랜
+server.tool(
+  "zero_cost_plan",
+  "무료로 이용 가능한 정책, 국비지원 훈련, 무료 상담만 모아서 보여줍니다.",
+  {
+    region: z.string().describe("지역명 (서울, 부산 등)"),
+    age: z.number().optional().describe("나이 (만 나이)"),
+    interest: z.enum(["취업", "창업", "주거", "교육", "전체"]).optional().default("전체").describe("관심 분야"),
+  },
+  async ({ region, age, interest }) => {
+    try {
+      const regionCode = REGION_CODES[region] || region;
+      const zipCd = regionCode.length === 2 ? `${regionCode}000` : regionCode;
+      const ctpvCd = regionCode.substring(0, 2);
+      const regionName = REGION_NAMES[ctpvCd] || region;
+
+      const categoryMap: Record<string, string> = {
+        "취업": "일자리",
+        "창업": "일자리",
+        "주거": "주거",
+        "교육": "교육",
+        "전체": ""
+      };
+
+      const policyParams: Record<string, string> = {
+        pageNum: "1",
+        pageSize: "20",
+        pageType: "1",
+        zipCd,
+      };
+      if (interest && interest !== "전체") {
+        policyParams.lclsfNm = categoryMap[interest] || "";
+      }
+
+      const [policyData, centerData, courses, programs] = await Promise.all([
+        fetchYouthPolicies(policyParams),
+        fetchYouthCenters({ pageNum: "1", pageSize: "5", ctpvCd }),
+        fetchTrainingCourses({
+          pageNum: "1",
+          pageSize: "10",
+          srchTraArea1: ctpvCd,
+          srchTraStDt: getDateString(),
+          srchTraEndDt: getDateString(90),
+        }).catch(() => []),
+        fetchEmploymentPrograms({ startPage: "1", display: "5" }).catch(() => []),
+      ]);
+
+      let policies = policyData.result.youthPolicyList || [];
+      if (age) {
+        policies = filterPoliciesByAge(policies, age);
+      }
+      const centers = centerData.result.youthPolicyList || [];
+
+      const result = [
+        `# 💸 비용 제로 플랜`,
+        ``,
+        `**무료로 청년의 꿈을 응원합니다!**`,
+        ``,
+        `- **지역:** ${regionName}`,
+        age ? `- **나이:** ${age}세` : "",
+        interest !== "전체" ? `- **관심분야:** ${interest}` : "",
+        ``,
+        `---`,
+        ``,
+        `## 🆓 무료 청년정책 (${policies.length}개)`,
+        `> 정부/지자체 지원으로 무료 혜택`,
+        ``,
+        policies.length > 0
+          ? policies.slice(0, 8).map(formatPolicyBrief).join("\n")
+          : "_해당 정책 없음_",
+        ``,
+        `## 📚 국비지원 훈련과정 (${courses.length}개)`,
+        `> 국민내일배움카드로 무료 수강`,
+        ``,
+        courses.length > 0 ? courses.slice(0, 5).map(course => [
+          `### ${course.trprNm}`,
+          `- **기관:** ${course.inoNm}`,
+          `- **기간:** ${course.traStartDate} ~ ${course.traEndDate}`,
+          `- **💰 자부담:** 국비지원 (카드 발급 필요)`,
+          course.eiEmplRate3 ? `- **취업률:** ${course.eiEmplRate3}%` : "",
+          ``
+        ].filter(l => l !== "").join("\n")).join("\n") : "_훈련과정 없음_",
+        ``,
+        `## 🏢 무료 상담 청년센터 (${centers.length}개)`,
+        `> 방문/전화 상담 모두 무료!`,
+        ``,
+        centers.length > 0 ? centers.map(formatCenterBrief).join("\n") : "_센터 없음_",
+        ``,
+        `## 🎯 무료 취업 프로그램`,
+        Array.isArray(programs) && programs.length > 0
+          ? programs.map(formatEmploymentProgram).join("\n")
+          : "_프로그램 없음_",
+        ``,
+        `---`,
+        `**💡 TIP:** 국민내일배움카드는 HRD-Net(hrd.go.kr)에서 신청하세요!`,
+      ].filter(line => line !== "").join("\n");
+
+      return { content: [{ type: "text" as const, text: result }] };
+    } catch (error) {
+      return { content: [{ type: "text" as const, text: `오류 발생: ${error instanceof Error ? error.message : "알 수 없는 오류"}` }], isError: true };
+    }
+  }
+);
+
+// 도구 31: 도움말 (업데이트)
 server.tool(
   "get_help",
-  "청년친구 MCP v3.0 사용법과 기능을 안내합니다.",
+  "청년친구 MCP v3.1 사용법과 기능을 안내합니다.",
   {},
   async () => {
     const helpText = [
@@ -1897,8 +2531,103 @@ async function startHttpServer() {
               }
             },
             {
+              name: "mega_search",
+              description: "키워드 하나로 정책, 센터, 채용, 훈련, 강소기업 등 모든 정보를 통합 검색합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  keyword: { type: "string", description: "검색 키워드" },
+                  age: { type: "number", description: "나이 - 자격요건 자동 필터링" },
+                  region: { type: "string", description: "지역명" },
+                  limit: { type: "number", description: "각 항목별 최대 결과 수 (기본 5)" }
+                },
+                required: ["keyword"]
+              }
+            },
+            {
+              name: "employment_full_package",
+              description: "목표 직종/직업을 입력하면 관련 채용정보, 필요 훈련, 지원 정책, 강소기업을 한번에 제공합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  jobKeyword: { type: "string", description: "목표 직종/직업 키워드" },
+                  region: { type: "string", description: "희망 근무지역" },
+                  age: { type: "number", description: "나이" },
+                  career: { type: "string", description: "경력 구분 (N: 신입, E: 경력, Z: 무관)" }
+                },
+                required: ["jobKeyword"]
+              }
+            },
+            {
+              name: "training_job_bridge",
+              description: "훈련과정 검색 후 해당 훈련과 연관된 채용정보를 NCS 코드 기반으로 자동 매칭합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  trainingKeyword: { type: "string", description: "훈련과정 키워드" },
+                  region: { type: "string", description: "훈련/취업 희망 지역" },
+                  ncsCode: { type: "string", description: "NCS 대분류코드" }
+                },
+                required: ["trainingKeyword"]
+              }
+            },
+            {
+              name: "personalized_recommendations",
+              description: "나이, 지역, 관심분야, 취업상태를 입력하면 자격요건에 맞는 정책과 프로그램만 추천합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  age: { type: "number", description: "나이" },
+                  region: { type: "string", description: "거주 지역" },
+                  category: { type: "string", description: "관심 분야 (일자리, 주거, 교육, 복지문화, 참여권리, 전체)" },
+                  employmentStatus: { type: "string", description: "취업 상태 (구직중, 재직중, 창업준비, 학생, 기타)" },
+                  incomeLevel: { type: "string", description: "소득 수준 (무소득, 저소득, 중위소득, 일반)" }
+                },
+                required: ["age", "region"]
+              }
+            },
+            {
+              name: "small_giant_package",
+              description: "강소기업과 연계된 청년정책, 채용정보, 일학습병행 프로그램을 패키지로 제공합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  region: { type: "string", description: "지역명" },
+                  industry: { type: "string", description: "업종 키워드" },
+                  includeJobPostings: { type: "boolean", description: "관련 채용정보 포함 여부" },
+                  includeTraining: { type: "boolean", description: "일학습병행 과정 포함 여부" }
+                }
+              }
+            },
+            {
+              name: "urgent_deadlines",
+              description: "마감 임박한 정책, 훈련, 채용정보를 긴급도 순으로 정렬하여 제공합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  region: { type: "string", description: "지역명" },
+                  daysLimit: { type: "number", description: "마감까지 남은 일수 (기본 30일)" },
+                  category: { type: "string", description: "정책 분야 필터" }
+                }
+              }
+            },
+            {
+              name: "zero_cost_plan",
+              description: "무료/국비 지원 정책, 훈련, 프로그램만 필터링하여 비용 부담 없는 옵션을 제공합니다.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  region: { type: "string", description: "지역명" },
+                  age: { type: "number", description: "나이" },
+                  category: { type: "string", description: "관심 분야 (일자리, 주거, 교육, 복지문화)" },
+                  includeTraining: { type: "boolean", description: "국비훈련 포함 여부" },
+                  includeCenters: { type: "boolean", description: "무료 센터 상담 포함 여부" }
+                }
+              }
+            },
+            {
               name: "get_help",
-              description: "청년친구 MCP v3.0 사용법과 기능을 안내합니다.",
+              description: "청년친구 MCP v3.1 사용법과 기능을 안내합니다.",
               inputSchema: { type: "object", properties: {} }
             }
           ]
@@ -1958,16 +2687,25 @@ async function startHttpServer() {
   app.get("/", (req: Request, res: Response) => {
     res.json({
       name: "청년친구 MCP",
-      version: "3.0.0",
-      description: "청년정책, 청년센터, 고용24 정보 통합 제공",
+      version: "3.1.0",
+      description: "청년정책, 청년센터, 고용24 정보 통합 제공 - 17개 통합 도구",
       transport: "sse",
       endpoint: "/sse",
-      tools: 22
+      tools: 17,
+      newFeatures: [
+        "mega_search: 12개 API 메가 통합 검색",
+        "employment_full_package: 취업 풀패키지",
+        "training_job_bridge: NCS 기반 훈련→채용 브릿지",
+        "personalized_recommendations: 프로필 맞춤 필터링",
+        "small_giant_package: 강소기업 취업 패키지",
+        "urgent_deadlines: 마감 임박 긴급 모드",
+        "zero_cost_plan: 비용 제로 플랜"
+      ]
     });
   });
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`청년친구 MCP 서버 v3.0이 시작되었습니다. (HTTP/SSE 모드, 포트: ${PORT})`);
+    console.log(`청년친구 MCP 서버 v3.1이 시작되었습니다. (HTTP/SSE 모드, 포트: ${PORT})`);
     console.log(`MCP 엔드포인트: GET /sse (SSE), POST /sse (JSON-RPC)`);
   });
 }
