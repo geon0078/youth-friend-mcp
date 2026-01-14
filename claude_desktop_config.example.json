@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "youth-friend": {
+      "command": "node",
+      "args": ["D:\\github\\청년친구-MCP\\dist\\index.js"]
+    }
+  }
+}

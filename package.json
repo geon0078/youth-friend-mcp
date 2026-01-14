@@ -1,0 +1,28 @@
+{
+  "name": "youth-friend-mcp",
+  "version": "3.0.0",
+  "description": "청년친구 MCP - 청년정책, 청년센터, 고용24 통합 정보 제공 MCP 서버",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "youth",
+    "policy",
+    "korea"
+  ],
+  "author": "Geon1",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
