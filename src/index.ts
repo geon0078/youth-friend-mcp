@@ -2,7 +2,9 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
+import express, { Request, Response } from "express";
 
 // ============================================
 // API 설정 (12개 API) - 환경변수에서 로드
@@ -1630,13 +1632,93 @@ server.tool(
 // 서버 시작
 // ============================================
 
-async function main() {
+const isHttpMode = process.env.MCP_HTTP_MODE === "true" || process.env.PORT !== undefined;
+
+async function startStdioServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("청년친구 MCP 서버 v3.0이 시작되었습니다. (22개 도구)");
+  console.error("청년친구 MCP 서버 v3.0이 시작되었습니다. (stdio 모드, 22개 도구)");
 }
 
-main().catch((error) => {
-  console.error("서버 시작 실패:", error);
-  process.exit(1);
-});
+async function startHttpServer() {
+  const app = express();
+  const PORT = parseInt(process.env.PORT || "3000", 10);
+
+  // CORS 설정
+  app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (req.method === "OPTIONS") {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+
+  app.use(express.json());
+
+  // Health check
+  app.get("/health", (req: Request, res: Response) => {
+    res.json({ status: "ok", version: "3.0.0", tools: 22 });
+  });
+
+  // SSE endpoint
+  const transports: Map<string, SSEServerTransport> = new Map();
+
+  app.get("/sse", async (req: Request, res: Response) => {
+    console.log("SSE 연결 요청");
+    const transport = new SSEServerTransport("/messages", res);
+    const sessionId = Math.random().toString(36).substring(7);
+    transports.set(sessionId, transport);
+
+    res.on("close", () => {
+      console.log(`SSE 연결 종료: ${sessionId}`);
+      transports.delete(sessionId);
+    });
+
+    await server.connect(transport);
+  });
+
+  app.post("/messages", async (req: Request, res: Response) => {
+    const sessionId = req.query.sessionId as string;
+    const transport = transports.get(sessionId);
+
+    if (transport) {
+      await transport.handlePostMessage(req, res);
+    } else {
+      res.status(400).json({ error: "세션을 찾을 수 없습니다" });
+    }
+  });
+
+  // 루트 경로 - API 정보
+  app.get("/", (req: Request, res: Response) => {
+    res.json({
+      name: "청년친구 MCP",
+      version: "3.0.0",
+      description: "청년정책, 청년센터, 고용24 정보 통합 제공",
+      endpoints: {
+        health: "/health",
+        sse: "/sse",
+        messages: "/messages"
+      },
+      tools: 22
+    });
+  });
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`청년친구 MCP 서버 v3.0이 시작되었습니다. (HTTP 모드, 포트: ${PORT})`);
+  });
+}
+
+// 모드에 따라 서버 시작
+if (isHttpMode) {
+  startHttpServer().catch((error) => {
+    console.error("HTTP 서버 시작 실패:", error);
+    process.exit(1);
+  });
+} else {
+  startStdioServer().catch((error) => {
+    console.error("Stdio 서버 시작 실패:", error);
+    process.exit(1);
+  });
+}
