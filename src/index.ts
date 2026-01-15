@@ -2386,7 +2386,7 @@ async function startHttpServer() {
     }
 
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Mcp-Session-Id, Last-Event-ID, X-API-Key");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Mcp-Session-Id, Last-Event-ID");
     res.header("Access-Control-Expose-Headers", "Content-Type, Mcp-Session-Id");
 
     if (req.method === "OPTIONS") {
@@ -3159,44 +3159,9 @@ async function startHttpServer() {
     });
   });
 
-  // API Key 인증 설정
-  const MCP_API_KEY = process.env.MCP_API_KEY;
-  const AUTH_ENABLED = !!MCP_API_KEY;
-
-  if (AUTH_ENABLED) {
-    console.log("API Key 인증이 활성화되었습니다.");
-  } else {
-    console.warn("경고: MCP_API_KEY가 설정되지 않아 인증 없이 운영됩니다.");
-  }
-
   // MCP 엔드포인트 - /mcp (Streamable HTTP - 2025-03-26 스펙)
   app.all("/mcp", async (req: Request, res: Response) => {
     console.log(`${req.method} /mcp - MCP 요청`);
-
-    // API Key 인증 검증
-    if (AUTH_ENABLED) {
-      const apiKey = req.headers["x-api-key"] as string;
-
-      if (!apiKey) {
-        return res.status(401).json({
-          jsonrpc: "2.0",
-          error: {
-            code: -32001,
-            message: "Unauthorized: X-API-Key header is required"
-          }
-        });
-      }
-
-      if (apiKey !== MCP_API_KEY) {
-        return res.status(403).json({
-          jsonrpc: "2.0",
-          error: {
-            code: -32002,
-            message: "Forbidden: Invalid API Key"
-          }
-        });
-      }
-    }
 
     try {
       await transport.handleRequest(req, res, req.body);
@@ -3220,8 +3185,7 @@ async function startHttpServer() {
       transport: "streamable-http",
       endpoint: "/mcp",
       protocolVersion: "2025-03-26",
-      tools: 29,
-      authentication: AUTH_ENABLED ? "X-API-Key header required" : "none"
+      tools: 29
     });
   });
 
