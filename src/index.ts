@@ -3,7 +3,7 @@
 import "dotenv/config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import express, { Request, Response } from "express";
 import { randomUUID } from "crypto";
@@ -2367,12 +2367,28 @@ async function startHttpServer() {
   const app = express();
   const PORT = parseInt(process.env.PORT || "3000", 10);
 
-  // CORS 설정
+  // CORS 설정 및 Origin 검증 (MCP 2025-03-26 스펙 준수)
+  const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(",") || ["*"];
+
   app.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
+    const origin = req.headers.origin;
+
+    // Origin 검증 (MCP 스펙 보안 요구사항)
+    if (origin) {
+      const isAllowed = ALLOWED_ORIGINS.includes("*") || ALLOWED_ORIGINS.includes(origin);
+      if (!isAllowed) {
+        console.warn(`Origin 거부: ${origin}`);
+        return res.status(403).json({ error: "Origin not allowed" });
+      }
+      res.header("Access-Control-Allow-Origin", origin);
+    } else {
+      res.header("Access-Control-Allow-Origin", "*");
+    }
+
     res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Mcp-Session-Id");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, Mcp-Session-Id, Last-Event-ID");
     res.header("Access-Control-Expose-Headers", "Content-Type, Mcp-Session-Id");
+
     if (req.method === "OPTIONS") {
       return res.sendStatus(200);
     }
@@ -2381,16 +2397,22 @@ async function startHttpServer() {
 
   app.use(express.json());
 
-  // 세션 관리
-  const sessions: Map<string, SSEServerTransport> = new Map();
+  // Streamable HTTP Transport (Stateless mode - 2025-03-26 스펙)
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined, // Stateless 모드
+  });
+
+  // MCP 서버에 transport 연결
+  await server.connect(transport);
 
   // Health check
   app.get("/health", (req: Request, res: Response) => {
     res.json({
       status: "ok",
-      version: "3.0.0",
-      tools: 22,
-      activeSessions: sessions.size
+      version: "3.1.0",
+      transport: "streamable-http",
+      endpoint: "/mcp",
+      protocolVersion: "2025-03-26"
     });
   });
 
@@ -3126,51 +3148,31 @@ async function startHttpServer() {
       });
     }
 
-    // SSE 세션 기반 메시지 처리 (세션이 있는 경우)
-    const sessionId = req.query.sessionId as string;
-    if (sessionId) {
-      const transport = sessions.get(sessionId);
-      if (transport) {
-        try {
-          await transport.handlePostMessage(req, res);
-          return;
-        } catch (error) {
-          console.error("메시지 처리 오류:", error);
-        }
-      }
-    }
-
-    // 알 수 없는 메서드
+    // 알 수 없는 메서드 (레거시 /sse 엔드포인트 - 새 /mcp 사용 권장)
     return res.json({
       jsonrpc: "2.0",
       id: body.id || null,
       error: {
         code: -32601,
-        message: `Method not found: ${body.method}`
+        message: `Method not found: ${body.method}. Use /mcp endpoint instead.`
       }
     });
   });
 
-  // GET /sse - SSE 스트림 연결
-  app.get("/sse", async (req: Request, res: Response) => {
-    console.log("GET /sse - SSE 연결 요청");
-
-    const transport = new SSEServerTransport("/sse", res);
-    const sessionId = transport.sessionId;
-
-    console.log(`새 세션 생성: ${sessionId}`);
-    sessions.set(sessionId, transport);
-
-    res.on("close", () => {
-      console.log(`세션 종료: ${sessionId}`);
-      sessions.delete(sessionId);
-    });
+  // MCP 엔드포인트 - /mcp (Streamable HTTP - 2025-03-26 스펙)
+  app.all("/mcp", async (req: Request, res: Response) => {
+    console.log(`${req.method} /mcp - MCP 요청`);
 
     try {
-      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
     } catch (error) {
-      console.error("SSE 연결 오류:", error);
-      sessions.delete(sessionId);
+      console.error("MCP 요청 처리 오류:", error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "Internal error" }
+        });
+      }
     }
   });
 
@@ -3179,25 +3181,17 @@ async function startHttpServer() {
     res.json({
       name: "청년친구 MCP",
       version: "3.1.0",
-      description: "청년정책, 청년센터, 고용24 정보 통합 제공 - 17개 통합 도구",
-      transport: "sse",
-      endpoint: "/sse",
-      tools: 17,
-      newFeatures: [
-        "mega_search: 12개 API 메가 통합 검색",
-        "employment_full_package: 취업 풀패키지",
-        "training_job_bridge: NCS 기반 훈련→채용 브릿지",
-        "personalized_recommendations: 프로필 맞춤 필터링",
-        "small_giant_package: 강소기업 취업 패키지",
-        "urgent_deadlines: 마감 임박 긴급 모드",
-        "zero_cost_plan: 비용 제로 플랜"
-      ]
+      description: "청년정책, 청년센터, 고용24 정보 통합 제공",
+      transport: "streamable-http",
+      endpoint: "/mcp",
+      protocolVersion: "2025-03-26",
+      tools: 29
     });
   });
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`청년친구 MCP 서버 v3.1이 시작되었습니다. (HTTP/SSE 모드, 포트: ${PORT})`);
-    console.log(`MCP 엔드포인트: GET /sse (SSE), POST /sse (JSON-RPC)`);
+    console.log(`청년친구 MCP 서버 v3.1이 시작되었습니다. (Streamable HTTP, 포트: ${PORT})`);
+    console.log(`MCP 엔드포인트: /mcp (Streamable HTTP)`);
   });
 }
 
